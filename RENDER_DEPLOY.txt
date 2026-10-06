@@ -1,0 +1,16 @@
+SENTRY Render deployment
+
+IMPORTANT:
+1. Upload the CONTENTS of this folder to the repository root.
+   app.py, requirements.txt, render.yaml and the core/ folder must be at repo root.
+2. Render Start Command:
+   gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300
+3. Do NOT use:
+   gunicorn web:app ...
+4. Python is pinned to 3.12.3 via .python-version and render.yaml.
+5. Build Command:
+   pip install -r requirements.txt
+
+If an existing Render service still shows "gunicorn web:app", open:
+Settings -> Build & Deploy -> Start Command
+and replace it with the command in step 2, then deploy the latest commit.
