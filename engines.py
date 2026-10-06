@@ -5,9 +5,9 @@ import math
 import numpy as np
 import pandas as pd
 
-import config
-from pricing import bs_price, greeks, binomial_american, implied_vol
-from simulate import cal_to_td, simulate_regimes, evaluate, time_path, profit_table
+from . import config
+from .pricing import bs_price, greeks, binomial_american, implied_vol
+from .simulate import cal_to_td, simulate_regimes, evaluate, time_path, profit_table
 
 NAN = float("nan")
 
@@ -350,13 +350,15 @@ def _rows(td, exp, kind, r, q, rv_fair):
         fair_bs = bs_price(td.price, K, T, r, rv_fair, kind, q)
         fair_bin = binomial_american(td.price, K, T, r, rv_fair, kind, q, steps=150)
         fair = (fair_bs + fair_bin) / 2
+        chg = row.get("change")
         out.append(dict(kind=kind, K=K, expiry=exp, dte=dte, bid=float(row["bid"]), ask=float(row["ask"]), mid=m,
+                        change=float(chg) if ok(chg) else None,
                         iv=iv, oi=oi, volume=vol, spread_pct=spread, hs=spread / 2, fair=fair,
                         mispricing=(m - fair) / fair if fair > 0.01 else NAN, **g))
     return out, rej
 
 
-def build_candidates(td, direction, r, rv_fair):
+def build_candidates(td, direction, r, rv_fair, settings):
     kind = "call" if direction == "BULLISH" else "put"
     sgn = 1 if kind == "call" else -1
     q = td.dividend_yield
@@ -367,9 +369,9 @@ def build_candidates(td, direction, r, rv_fair):
             rejected[k] += rej[k]
         liquid = []
         for x in rows:
-            if abs(x["delta"]) < config.MIN_DELTA and not config.ALLOW_HIGH_SPECULATION:
+            if abs(x["delta"]) < config.MIN_DELTA:
                 rejected["lottery"] += 1
-            elif x["oi"] < config.MIN_OPEN_INTEREST or x["spread_pct"] > config.MAX_SPREAD_PCT:
+            elif x["oi"] < settings["min_open_interest"] or x["spread_pct"] > settings["max_spread_pct"]:
                 rejected["illiquid"] += 1
             else:
                 liquid.append(x)
@@ -387,7 +389,7 @@ def build_candidates(td, direction, r, rv_fair):
             if abs(c["delta"]) >= 0.45:
                 shorts = [x for x in rows if sgn * (x["K"] - c["K"]) >= 0.05 * td.price and x["bid"] > 0
                           and abs(x["delta"]) <= abs(c["delta"]) - 0.10
-                          and x["oi"] >= config.MIN_OPEN_INTEREST / 2 and x["spread_pct"] <= 0.15]
+                          and x["oi"] >= settings["min_open_interest"] / 2 and x["spread_pct"] <= 0.15]
                 if shorts:
                     sh = min(shorts, key=lambda x: abs(abs(x["delta"]) - (abs(c["delta"]) - 0.25)))
                     trades.append(_make_trade(td, direction, f"{kind.title()} Debit Spread", [c, sh], label))
@@ -409,52 +411,23 @@ def _make_trade(td, direction, strategy, contracts, label):
         width = abs(s["K"] - long_leg["K"])
     sgn = 1 if long_leg["kind"] == "call" else -1
     dte = long_leg["dte"]
-    exit_dte = max(21, int(0.35 * dte))      # leave the steep end of theta decay to the seller
-    horizon_cal = max(7, dte - exit_dte)
+    horizon_cal = max(5, int(dte * 0.65))     # provisional; decisions.apply_plan derives the real time exit
     horizon_td = cal_to_td(horizon_cal)
-    target_ret = max(0.25, 0.8 * width / cost - 1) if width else 1.0
     return dict(ticker=td.ticker, direction=direction, strategy=strategy, moneyness=label, expiry=long_leg["expiry"],
                 dte=dte, legs=legs, contracts=contracts, cost=cost, width=width,
                 breakeven=long_leg["K"] + sgn * cost, max_loss=cost * 100,
                 max_gain=(width - cost) * 100 if width else None, iv=long_leg["iv"], oi=long_leg["oi"],
                 spread_pct=max(c["spread_pct"] for c in contracts), mispricing=long_leg["mispricing"],
                 fair=long_leg["fair"] - (contracts[1]["fair"] if width else 0), **net,
-                horizon_cal=horizon_cal, horizon_td=horizon_td, expiry_td=cal_to_td(dte), target_ret=target_ret,
-                monitor_td=[5] + list(range(21, horizon_td, 21)),
+                horizon_cal=horizon_cal, horizon_td=horizon_td, expiry_td=cal_to_td(dte),
+                monitor_td=[], kind=long_leg["kind"], bid=long_leg["bid"] - (contracts[1]["ask"] if width else 0),
+                ask=cost, mid=long_leg["mid"] - (contracts[1]["mid"] if width else 0),
                 exit_date=str(dt.date.today() + dt.timedelta(days=horizon_cal)))
 
 
 def objective(st):
     """Probability-adjusted return on capital: Sortino-style EV / downside, nudged by chance of profit."""
     return st["sortino"] * st["p_profit"] * (1 - st["p_total_loss_no_stop"])
-
-
-# =========================================================== 18. EXIT ENGINE
-def exit_plan(trade, tech, td):
-    c = trade["cost"]
-    if trade["width"]:
-        tgt = c * (1 + trade["target_ret"])
-        profit = f"Sell when spread is worth ${tgt:.2f} ({trade['target_ret']:+.0%})"
-    else:
-        tgt = 2 * c
-        profit = f"Sell all at ${tgt:.2f} (+100%)"
-    s = tech["sma"]
-    if trade["direction"] == "BULLISH":
-        lvl = max(tech["low60"], s[50] * 0.97) if ok(s[50]) else tech["low60"]
-        thesis = f"Daily close below ${lvl:.2f} (50-day trend / 60-day support broken)"
-    else:
-        lvl = min(tech["high60"], s[50] * 1.03) if ok(s[50]) else tech["high60"]
-        thesis = f"Daily close above ${lvl:.2f} (50-day trend / 60-day resistance reclaimed)"
-    plan = dict(target_price=tgt, profit=profit, partial=f"At ${1.5 * c:.2f} (+50%) sell half",
-                loss=f"Sell if option falls to ${0.5 * c:.2f} (-50% of premium)",
-                time=f"Sell by {trade['exit_date']} if targets not hit (avoids the steepest theta decay)",
-                thesis=thesis, invalid_level=lvl,
-                post="Re-run the scan within a day of any catalyst; exit if the signal turns SELL/AVOID. "
-                     "Never hold just because the position is losing.")
-    if td.earnings_date and str(td.earnings_date) < trade["expiry"]:
-        plan["pre_earnings"] = (f"Before {td.earnings_date} earnings: if up 30%+, sell half; "
-                                f"if down, do not add; IV usually drops after the report")
-    return plan
 
 
 # =========================================================== 12/13. COMMITTEE + CONTRARIAN
@@ -495,7 +468,7 @@ def committee(c):
     if st["p_total_loss_no_stop"] > 0.45: vetoes.append("Total-loss probability above 45% (no stop)")
     if st["p_loss50"] > 0.65: vetoes.append("Losing half or more is the most likely outcome")
     if c["dq"] == "LOW": vetoes.append("Data quality LOW")
-    if tr["oi"] < config.MIN_OPEN_INTEREST: vetoes.append("Not enough open interest")
+    if tr["oi"] < c.get("min_oi", 100): vetoes.append("Not enough open interest")
     v["G Risk"] = "AVOID" if vetoes else "BUY"
 
     move_needed = abs(tr["breakeven"] / c["S0"] - 1)
@@ -523,103 +496,3 @@ def data_quality(flags):
     return "LOW" if sev else "MEDIUM" if flags else "HIGH"
 
 
-def analyse(td, macro, bench, n_paths):
-    results = []
-    if td.price is None or td.hist is None or not td.chains:
-        return [dict(ticker=td.ticker, action="AVOID", error="; ".join(m for _, m in td.flags) or "no data")]
-    r, q = macro["r"], td.dividend_yield
-    tech = technical_engine(td.hist, bench)
-    fund = fundamental_engine(td)
-    exp = expectation_engine(td, tech, r)
-    rv_fair = mean_ok([0.6 * tech["rv20"] + 0.4 * tech["rv252"] if ok(tech["rv252"]) else tech["rv20"]], 0.3)
-    sigma_sim = mean_ok([rv_fair, exp.get("atm_iv")], 0.3)
-
-    composite = 0.5 * tech["score"] + 0.25 * fund["score"] + 0.25 * macro["score"]
-    dirs = (["BULLISH"] if composite >= 45 else []) + (["BEARISH"] if composite <= 55 else [])
-
-    earn_cal = (td.earnings_date - dt.date.today()).days if td.earnings_date else None
-    earn_sd = (exp["hist_earn_move"] * 1.25 if ok(exp.get("hist_earn_move")) else 0.05) if not td.is_etf else 0.0
-    ctx = dict(S0=td.price, r=r, q=q, earn_cal=earn_cal, weights=macro["weights"])
-    flags = list(td.flags) + [("MINOR", f) for f in macro["flags"]]
-
-    for direction in dirs:
-        cands, rejected = build_candidates(td, direction, r, rv_fair)
-        if sum(rejected.values()) and rejected["no_quote"] > 0.8 * (sum(rejected.values()) + len(cands)):
-            flags.append(("SEVERE", "Most contracts have no live bid/ask (market closed?) - run during US market hours"))
-        if not cands:
-            results.append(dict(ticker=td.ticker, direction=direction, action="AVOID", rejected=rejected,
-                                error="No liquid contract passed filters", flags=flags))
-            continue
-        cps = {t["horizon_td"] for t in cands} | {t["expiry_td"] for t in cands} | {1, 5, 21, 63, 126, 252}
-        cps |= {d for t in cands for d in t["monitor_td"]}
-        cps = {c for c in cps if c <= max(t["expiry_td"] for t in cands)}
-        earn_td = cal_to_td(earn_cal) if earn_cal is not None and earn_cal >= 1 else None
-        sims = simulate_regimes(td.price, sigma_sim, cps, n_paths, earn_td, earn_sd)
-        for t in cands:
-            t["stats"] = evaluate(t, sims, ctx)
-        cands.sort(key=lambda t: objective(t["stats"]), reverse=True)
-        best = cands[0]
-        st = best["stats"]
-
-        bull = direction == "BULLISH"
-        fund_dir = fund["score"] if bull else 100 - fund["score"]
-        val_dir = fund["valuation"] if bull else 100 - fund["valuation"]
-        growth_dir = fund["growth"] if bull else 100 - fund["growth"]
-        macro_dir = macro["score"] if bull else 100 - macro["score"]
-        tech_dir = tech["score"] if bull else 100 - tech["score"]
-        cat = catalyst_engine(td, exp, direction)
-        bt = backtest_engine(tech, direction, best["horizon_td"])
-        dq = data_quality(flags)
-        binary = earn_cal is not None and earn_cal < best["horizon_cal"] and best["dte"] < 60
-
-        iv_rv = exp.get("iv_rv", 1.0) if ok(exp.get("iv_rv")) else 1.0
-        mis = best["mispricing"] if ok(best["mispricing"]) else 0.0
-        comp = dict(fundamentals=fund_dir, growth=growth_dir, valuation=val_dir, catalysts=cat["score"],
-                    macro=macro_dir, technical=tech_dir,
-                    options_pricing=clip(60 - 100 * (iv_rv - 1) - 40 * mis),
-                    mc_ev=clip(50 + 100 * st["mean"]),
-                    liquidity=clip(100 - 500 * best["spread_pct"] - (30 if best["oi"] < 500 else 0)),
-                    risk_reward=clip(50 + 25 * st["sortino"]))
-        raw = sum(config.SCORE_WEIGHTS[k] * comp[k] for k in comp)
-        pen = []
-        atm = exp.get("atm_iv", 0) or 0
-        if atm > 1.0 or iv_rv > 1.6: pen.append(("Extreme IV", 10))
-        if best["oi"] < 250: pen.append(("Poor liquidity", 5))
-        if best["spread_pct"] > 0.08: pen.append(("Wide bid/ask spread", 8))
-        if dq == "LOW": pen.append(("Weak data quality", 10))
-        elif dq == "MEDIUM": pen.append(("Delayed/partial data", 4))
-        if best["cost"] and abs(best["theta"]) / best["cost"] > 0.015: pen.append(("Excessive theta", 6))
-        if binary: pen.append(("Binary-event dependence", 6))
-        if fund["leverage_flag"] and bull: pen.append(("Excessive leverage", 5))
-        score = clip(raw - sum(p for _, p in pen))
-
-        c = dict(stats=st, trade=best, exp=exp, fund_dir=fund_dir, val_dir=val_dir, macro_dir=macro_dir,
-                 tech_dir=tech_dir, binary=binary, dq=dq, backtest=bt, S0=td.price)
-        com = committee(c)
-        votes = com["votes"]
-        if (score >= config.BUY_MIN_SCORE and st["mean"] > 0 and not com["vetoes"] and com["contrarian_pass"]
-                and votes["C Quant"] != "AVOID" and dq != "LOW"):
-            action = "BUY"
-        elif score >= config.WATCH_MIN_SCORE and st["mean"] > -0.10 and dq != "LOW":
-            action = "WATCH"
-        else:
-            action = "AVOID"
-        g = grade(score)
-        confidence = clip(score * {"HIGH": 1.0, "MEDIUM": 0.85, "LOW": 0.6}[dq] - (5 if bt["n"] < 30 else 0))
-
-        # strategy optimiser summary: best of each structure + nearby alternatives
-        per_strategy = {}
-        for t in cands:
-            per_strategy.setdefault(t["strategy"], t)
-        results.append(dict(
-            ticker=td.ticker, direction=direction, action=action, score=score, grade=g,
-            risk_budget_pct=config.RISK_BUDGET_PCT[g] if action == "BUY" else 0.0, confidence=confidence,
-            components=comp, penalties=pen, trade=best, stats=st, alternatives=cands[1:4],
-            per_strategy=list(per_strategy.values()), exit=exit_plan(best, tech, td),
-            time_path=time_path(best, sims, ctx), profit=profit_table(best, ctx),
-            committee=com, tech=tech, fund=fund, exp=exp, catalysts=cat, backtest=bt, macro=macro,
-            dq=dq, flags=flags, sources=td.sources, price=td.price, price_time=td.price_time,
-            rejected=rejected, contracts_affordable=int(config.INVESTMENT // (best["cost"] * 100)),
-            sigma_sim=sigma_sim, rv_fair=rv_fair,
-        ))
-    return results

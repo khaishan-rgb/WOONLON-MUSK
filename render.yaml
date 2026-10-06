@@ -1,9 +1,25 @@
+# Render Blueprint: New > Blueprint > pick this repo.
 services:
   - type: web
-    name: ai-options-machine
+    name: sentry-options
     runtime: python
-    rootDir: options_machine
+    plan: starter            # free plans sleep when idle, which pauses the background worker
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn web:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 180 --bind 0.0.0.0:$PORT
     healthCheckPath: /health
-    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: DATA_MODE
+        value: live
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sentry-db
+          property: connectionString
+      - key: SEC_USER_AGENT
+        sync: false          # e.g. "Your Name you@email.com"
+      - key: FINNHUB_API_KEY
+        sync: false          # optional, free at finnhub.io
+databases:
+  - name: sentry-db
+    plan: free
