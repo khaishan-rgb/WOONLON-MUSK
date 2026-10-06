@@ -6,8 +6,8 @@ Exits inside the simulation follow the trade plan: main target, thesis invalidat
 and the maximum-risk rule - NOT an arbitrary -20%/-30% stop.
 """
 import numpy as np
-from . import config
-from .pricing import bs_price
+import config
+from pricing import bs_price
 
 
 def cal_to_td(cal_days):

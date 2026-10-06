@@ -5,9 +5,9 @@ import math
 
 import numpy as np
 
-from . import config, engines, decisions as D
-from .providers import load_ticker, iso
-from .simulate import simulate_regimes, evaluate, time_path, profit_table, cal_to_td
+import config, engines, decisions as D
+from providers import load_ticker, iso
+from simulate import simulate_regimes, evaluate, time_path, profit_table, cal_to_td
 
 ok = engines.ok
 

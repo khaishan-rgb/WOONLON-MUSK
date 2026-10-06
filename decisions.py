@@ -13,7 +13,7 @@ import math
 
 import numpy as np
 
-from .simulate import position_value, cal_to_td
+from simulate import position_value, cal_to_td
 
 ENTRY_COLORS = {"BUY NOW": "green", "BUY IF TRIGGERED": "green", "WAIT": "yellow", "AVOID": "black"}
 

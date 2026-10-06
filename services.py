@@ -6,11 +6,11 @@ import traceback
 
 import numpy as np
 
-from . import config, db, engines
-from .analysis import scan_ticker, evaluate_position, analyse, contract_name
-from .decisions import ACTION_URGENCY
-from .market import market_status, overview
-from .providers import providers, load_ticker, iso, ChainStore
+import config, db, engines
+from analysis import scan_ticker, evaluate_position, analyse, contract_name
+from decisions import ACTION_URGENCY
+from market import market_status, overview
+from providers import providers, load_ticker, iso, ChainStore
 
 STATE_RANK = {"BUY NOW": 0, "BUY IF TRIGGERED": 1, "WAIT": 2, "AVOID": 3}
 

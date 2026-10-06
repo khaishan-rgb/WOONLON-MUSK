@@ -3,7 +3,7 @@ import threading
 import time
 import traceback
 
-from . import db, services
+import db, services
 
 _started = False
 _busy = threading.Lock()

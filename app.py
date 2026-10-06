@@ -5,13 +5,25 @@ Production:    gunicorn app:app --workers 1 --threads 8 --timeout 120
 """
 import datetime as dt
 import os
+import sys
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_from_directory
 
-from core import config, db, services, worker
-from core.market import market_status, overview
+# Works with BOTH repo layouts:
+#   nested:  app.py + core/*.py + static/*      (as in the zip)
+#   flat:    every file in the repo root         (what GitHub's web uploader produces)
+HERE = os.path.dirname(os.path.abspath(__file__))
+CORE = os.path.join(HERE, "core")
+sys.path.insert(0, HERE)
+if os.path.isdir(CORE):
+    sys.path.insert(0, CORE)
+STATIC = os.path.join(HERE, "static") if os.path.isfile(os.path.join(HERE, "static", "app.js")) else HERE
+STATIC_FILES = {"app.js", "style.css", "index.html"}
 
-app = Flask(__name__, static_folder="static", static_url_path="/static")
+import config, db, services, worker          # noqa: E402
+from market import market_status, overview   # noqa: E402
+
+app = Flask(__name__, static_folder=None)
 app.json.sort_keys = False
 services.setup()
 if config.RUN_WORKER:
@@ -28,7 +40,14 @@ def err(msg, code=400):
 
 @app.get("/")
 def index():
-    return send_from_directory("static", "index.html")
+    return send_from_directory(STATIC, "index.html")
+
+
+@app.get("/static/<name>")
+def static_file(name):
+    if name not in STATIC_FILES:          # never serve source code or anything else from the folder
+        abort(404)
+    return send_from_directory(STATIC, name)
 
 
 @app.get("/health")
@@ -266,7 +285,7 @@ def api_journal():
 # ---------------------------------------------------------------- settings
 @app.get("/api/settings")
 def api_settings():
-    from core.providers import providers
+    from providers import providers
     return jsonify(settings=db.get_settings(), modes=config.MODES, alert_types=config.ALERT_TYPES,
                    providers=providers().describe(), database="PostgreSQL" if db.PG else "SQLite")
 

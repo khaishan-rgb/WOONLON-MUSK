@@ -75,3 +75,7 @@ Keys stay on the server. The browser only talks to this app's `/api`.
 - Probabilities are model estimates. The journal measures whether they are calibrated — trust them only once
   enough outcomes have accumulated.
 - Default thresholds are strict on purpose (Entry Score ≥ 80 etc.). Expect many WAIT/AVOID results. Adjust in Settings.
+
+## Repo layout
+The app runs whether the files sit in `core/` and `static/` folders or all together in the repo root
+(GitHub's drag-and-drop uploader flattens folders). See `RENDER_DEPLOY.txt`.

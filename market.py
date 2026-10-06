@@ -28,8 +28,8 @@ def market_status(now=None):
 
 
 def overview():
-    from .providers import providers
-    from . import config
+    from providers import providers
+    import config
     P = providers()
     out = []
     for label, sym in config.INDEXES.items():

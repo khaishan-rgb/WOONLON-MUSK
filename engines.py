@@ -5,9 +5,9 @@ import math
 import numpy as np
 import pandas as pd
 
-from . import config
-from .pricing import bs_price, greeks, binomial_american, implied_vol
-from .simulate import cal_to_td, simulate_regimes, evaluate, time_path, profit_table
+import config
+from pricing import bs_price, greeks, binomial_american, implied_vol
+from simulate import cal_to_td, simulate_regimes, evaluate, time_path, profit_table
 
 NAN = float("nan")
 

@@ -8,7 +8,7 @@ import os
 import sqlite3
 import threading
 
-from . import config
+import config
 
 URL = config.DATABASE_URL
 PG = URL.startswith(("postgres://", "postgresql://"))
@@ -164,7 +164,7 @@ def save_settings(new):
 def save_chain(sym, exp, chain):
     data = {k: df.drop(columns=[c for c in df.columns if c == "lastTradeDate"]).to_dict("list")
             for k, df in chain.items()}
-    from .providers import iso
+    from providers import iso
     execute("DELETE FROM chain_cache WHERE ticker=? AND expiry=?", (sym, exp))
     execute("INSERT INTO chain_cache (ticker, expiry, ts, data) VALUES (?,?,?,?)", (sym, exp, iso(), jdump(data)))
 

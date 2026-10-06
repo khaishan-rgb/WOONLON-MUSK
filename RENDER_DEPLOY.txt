@@ -1,16 +1,31 @@
-SENTRY Render deployment
+SENTRY - Render deployment (works with a FLAT repo: every file in the repo root)
 
-IMPORTANT:
-1. Upload the CONTENTS of this folder to the repository root.
-   app.py, requirements.txt, render.yaml and the core/ folder must be at repo root.
-2. Render Start Command:
-   gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300
-3. Do NOT use:
-   gunicorn web:app ...
-4. Python is pinned to 3.12.3 via .python-version and render.yaml.
-5. Build Command:
-   pip install -r requirements.txt
+WHY THE OLD BUILD FAILED
+  Your Render "Build Command" contained "ls core". GitHub's web uploader drops folders,
+  so there is no core/ folder in the repo -> "ls: cannot access 'core'" -> build failed.
+  This version no longer needs any folders.
 
-If an existing Render service still shows "gunicorn web:app", open:
-Settings -> Build & Deploy -> Start Command
-and replace it with the command in step 2, then deploy the latest commit.
+STEP 1 - Clean the repo (GitHub website)
+  Delete these old files if they exist: web.py, main.py, report.py, demo.py, data_sources.py,
+  and every *.pyc file. (They are leftovers; deleting them avoids confusion.)
+
+STEP 2 - Upload
+  Unzip, open the folder, select ALL files (including .python-version and .gitignore),
+  drag them onto the repo page on GitHub -> "Commit changes". Replace when asked.
+
+STEP 3 - Render settings (Dashboard -> your service -> Settings -> Build & Deploy)
+  Build Command:  pip install -r requirements.txt
+  Start Command:  gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300
+  Health Check Path: /health
+  (Nothing else in the build command - no "ls", no "cd core".)
+
+STEP 4 - Environment (Settings -> Environment)
+  PYTHON_VERSION = 3.12.3
+  DATA_MODE      = live        (or demo to test with synthetic data)
+  SEC_USER_AGENT = Your Name your@email.com
+  DATABASE_URL   = Internal Database URL of a Render PostgreSQL database
+                   (without it the app uses SQLite, which Render wipes on every deploy)
+  FINNHUB_API_KEY = optional
+
+STEP 5 - Manual Deploy -> "Clear build cache & deploy".
+  Then open https://YOUR-APP.onrender.com/health  -> should show "status": "ok".

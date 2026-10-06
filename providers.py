@@ -23,9 +23,9 @@ import numpy as np
 import pandas as pd
 import requests
 
-from . import config
-from .market import market_status
-from .pricing import bs_price
+import config
+from market import market_status
+from pricing import bs_price
 
 
 def now_utc():
