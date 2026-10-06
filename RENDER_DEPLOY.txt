@@ -29,3 +29,8 @@ STEP 4 - Environment (Settings -> Environment)
 
 STEP 5 - Manual Deploy -> "Clear build cache & deploy".
   Then open https://YOUR-APP.onrender.com/health  -> should show "status": "ok".
+
+STEP 6 - Check the data connections
+  Open the app -> Settings -> "Test data connections" (or visit /api/diagnostics?t=SPY).
+  "Cboe option chain" or "Yahoo option expiries" must show OK for scans to find contracts.
+  If both FAIL, copy the table and send it - it shows exactly which source is blocked.

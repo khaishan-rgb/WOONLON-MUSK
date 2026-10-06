@@ -15,6 +15,7 @@ Missing data is reported as missing - never invented.
 import datetime as dt
 import hashlib
 import io
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -94,6 +95,10 @@ def cached(key, ttl, fn):
     return v, m
 
 
+KNOWN_ETFS = {"SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV", "XLI", "XLY", "XLP", "XLU", "SMH", "SOXX",
+              "GLD", "SLV", "TLT", "HYG", "EEM", "EFA", "FXI", "KWEB", "ARKK", "USO", "UNG", "VXX", "IBIT", "GDX", "XBI", "KRE"}
+
+
 @dataclass
 class TickerData:
     ticker: str
@@ -121,7 +126,9 @@ class TickerData:
 
 def _delay_label():
     st = market_status()["status"]
-    return "15-MIN DELAY", ("" if st == "OPEN" else f"market {st.lower()}: last session values")
+    if st == "OPEN":
+        return "15-MIN DELAY", ""
+    return "LAST SESSION", f"market {st.lower()}: last session values"
 
 
 # ------------------------------------------------------------------ Yahoo (free, unofficial, delayed)
@@ -163,7 +170,11 @@ class Yahoo:
     def expiries(self, sym):
         def f():
             try:
-                return list(self._t(sym).options or []), meta(self.name, "15-MIN DELAY", "MEDIUM")
+                exps = list(self._t(sym).options or [])
+                if not exps:
+                    return None, meta(self.name, "UNAVAILABLE", "NONE",
+                                      "Yahoo returned no expiries (often blocked/rate-limited from cloud servers)")
+                return exps, meta(self.name, "15-MIN DELAY", "MEDIUM")
             except Exception as ex:
                 return None, meta(self.name, "UNAVAILABLE", "NONE", str(ex)[:120])
         return cached(("exp", sym), 3600, f)
@@ -181,7 +192,8 @@ class Yahoo:
                     return {"calls": calls, "puts": puts}, meta(self.name, "UNAVAILABLE", "LOW",
                                                                 "no live bid/ask (market closed?)")
                 fr, note = _delay_label()
-                ChainStore.save(sym, exp, {"calls": calls, "puts": puts})
+                if fr == "15-MIN DELAY":
+                    ChainStore.save(sym, exp, {"calls": calls, "puts": puts})
                 return {"calls": calls, "puts": puts}, meta(self.name, fr, "MEDIUM", note)
             except Exception as ex:
                 return None, meta(self.name, "UNAVAILABLE", "NONE", str(ex)[:120])
@@ -221,6 +233,126 @@ class Yahoo:
             return (nxt, moves), meta(self.name, "15-MIN DELAY", "LOW", "earnings calendar (unofficial)")
         return cached(("earn", sym), 43200, f)
 
+
+
+# ------------------------------------------------------------------ Cboe delayed quotes (free, official exchange data, no key)
+def _f(x):
+    try:
+        v = float(x)
+        return None if math.isnan(v) else v
+    except (TypeError, ValueError):
+        return None
+
+
+class CboeOptions:
+    """Full option chains from Cboe's public delayed-quote JSON (cdn.cboe.com). One request per ticker.
+    Usually works from cloud servers where Yahoo's option endpoints are blocked."""
+    name = "Cboe delayed quotes"
+    limiter = RateLimiter(0.3)
+    URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{}.json"
+    INDEXES = {"SPX", "NDX", "RUT", "VIX", "XSP", "DJX"}
+
+    def _raw(self, sym):
+        code = ("_" + sym) if sym.upper() in self.INDEXES else sym.upper().replace(".", "-")
+
+        def f():
+            try:
+                self.limiter.wait()
+                r = requests.get(self.URL.format(code), timeout=config.HTTP_TIMEOUT,
+                                 headers={"User-Agent": "Mozilla/5.0 (compatible; SentryOptions/2.0)", "Accept": "application/json"})
+                if r.status_code == 403 or r.status_code == 404:
+                    return None, meta(self.name, "UNAVAILABLE", "NONE", f"Cboe HTTP {r.status_code} (no listed options for {sym}?)")
+                r.raise_for_status()
+                js = r.json()
+                data = js.get("data") or {}
+                rows = []
+                for o in data.get("options") or []:
+                    occ = str(o.get("option", ""))
+                    tail = occ[-15:]
+                    try:
+                        exp = dt.datetime.strptime(tail[:6], "%y%m%d").date()
+                        kind = {"C": "call", "P": "put"}[tail[6]]
+                        K = int(tail[7:]) / 1000.0
+                    except Exception:
+                        continue
+                    rows.append(dict(expiry=str(exp), kind=kind, contractSymbol=occ, strike=K,
+                                     bid=_f(o.get("bid")) or 0.0, ask=_f(o.get("ask")) or 0.0,
+                                     lastPrice=_f(o.get("last_trade_price")), change=_f(o.get("change")),
+                                     volume=_f(o.get("volume")) or 0.0, openInterest=_f(o.get("open_interest")) or 0.0,
+                                     impliedVolatility=_f(o.get("iv")), lastTradeDate=None))
+                if not rows:
+                    return None, meta(self.name, "UNAVAILABLE", "NONE", f"Cboe returned no option contracts for {sym}")
+                df = pd.DataFrame(rows)
+                price = _f(data.get("current_price")) or _f(data.get("close"))
+                prev = _f(data.get("prev_day_close"))
+                st = market_status()["status"]
+                fr = "15-MIN DELAY" if st == "OPEN" else "LAST SESSION"
+                note = "" if st == "OPEN" else f"market {st.lower()}: closing quotes from the last session"
+                return dict(df=df, price=price, prev=prev, ts=js.get("timestamp")), meta(self.name, fr, "HIGH", note)
+            except Exception as ex:
+                return None, meta(self.name, "UNAVAILABLE", "NONE", f"{ex.__class__.__name__}: {str(ex)[:100]}")
+        return cached(("cboe", sym), 300, f)
+
+    def expiries(self, sym):
+        raw, m = self._raw(sym)
+        if not raw:
+            return None, m
+        return sorted(raw["df"]["expiry"].unique().tolist()), m
+
+    def chain(self, sym, exp):
+        raw, m = self._raw(sym)
+        if not raw:
+            return None, m
+        df = raw["df"]
+        sub = df[df["expiry"] == exp]
+        if sub.empty:
+            return None, meta(self.name, "UNAVAILABLE", "NONE", f"no contracts for {exp}")
+        calls = sub[sub["kind"] == "call"].drop(columns=["expiry", "kind"]).sort_values("strike").reset_index(drop=True)
+        puts = sub[sub["kind"] == "put"].drop(columns=["expiry", "kind"]).sort_values("strike").reset_index(drop=True)
+        live = ((calls["bid"] > 0) & (calls["ask"] > 0)).mean() if len(calls) else 0
+        if live < 0.2:
+            snap = ChainStore.load(sym, exp)
+            if snap:
+                return snap[0], meta(self.name, "CACHED", "LOW", f"last good snapshot taken {snap[1]}")
+            return {"calls": calls, "puts": puts}, meta(self.name, "UNAVAILABLE", "LOW", "no bid/ask in Cboe data right now")
+        if m["freshness"] == "15-MIN DELAY":
+            ChainStore.save(sym, exp, {"calls": calls, "puts": puts})
+        return {"calls": calls, "puts": puts}, m
+
+    def quote(self, sym):
+        raw, m = self._raw(sym)
+        if not raw or not raw["price"]:
+            return None, m
+        return raw["price"], dict(m, note="Cboe underlying price (cross-check)")
+
+
+class FailoverOptions:
+    """Try option sources in order; remember which one served each ticker so expiries and chains match."""
+    def __init__(self, *sources):
+        self.sources = sources
+        self.name = " -> ".join(s.name for s in sources)
+        self._used = {}
+
+    def expiries(self, sym):
+        notes = []
+        for src in self.sources:
+            v, m = src.expiries(sym)
+            if v:
+                self._used[sym] = src
+                return v, m
+            notes.append(f"{src.name}: {m.get('note', '')}")
+        return None, meta(self.name, "UNAVAILABLE", "NONE", " | ".join(notes))
+
+    def chain(self, sym, exp):
+        src = self._used.get(sym)
+        order = [src] + [s for s in self.sources if s is not src] if src else list(self.sources)
+        last = None
+        for s in order:
+            v, m = s.chain(sym, exp)
+            if v is not None:
+                return v, m
+            last = m
+        return None, last
 
 # ------------------------------------------------------------------ SEC EDGAR (free, official)
 class EdgarFundamentals:
@@ -490,12 +622,15 @@ class DemoData:
 class Providers:
     def __init__(self, mode=config.DATA_MODE):
         self.mode = mode
+        self.cboe = None
         if mode == "demo":
             d = DemoData()
             self.stock = self.options = self.info = self.fundamentals = self.macro = self.news = d
         else:
             y = Yahoo()
-            self.stock = self.options = self.info = y
+            self.cboe = CboeOptions()
+            self.stock = self.info = y
+            self.options = FailoverOptions(self.cboe, y)
             self.fundamentals = EdgarFundamentals()
             self.macro = FredMacro()
             self.news = FinnhubNews() if config.FINNHUB_KEY else NullNews()
@@ -540,15 +675,17 @@ def load_ticker(sym, min_dte=7, max_dte=545, expiries=None, max_expiries=config.
     info, m = P.info.info(sym)
     td.info = info or {}
     td.name = td.info.get("longName") or td.info.get("shortName") or sym
-    td.is_etf = td.info.get("quoteType") == "ETF"
+    td.is_etf = td.info.get("quoteType") == "ETF" or sym in KNOWN_ETFS
     dy = td.info.get("dividendYield") or 0.0
     td.dividend_yield = float(dy) / 100 if dy and dy > 0.2 else float(dy or 0.0)
 
     # option chains
     if expiries is None:
-        exps, m = P.options.expiries(sym)
+        all_exps, m = P.options.expiries(sym)
         today = dt.date.today()
-        exps = [e for e in (exps or []) if min_dte <= (dt.date.fromisoformat(e) - today).days <= max_dte]
+        exps = [e for e in (all_exps or []) if min_dte <= (dt.date.fromisoformat(e) - today).days <= max_dte]
+        if all_exps and not exps:
+            m = dict(m, note=f"{len(all_exps)} expiries listed, none {min_dte}-{max_dte} days out")
         if len(exps) > max_expiries:
             idx = np.linspace(0, len(exps) - 1, max_expiries).round().astype(int)
             exps = [exps[i] for i in sorted(set(idx))]
@@ -567,10 +704,13 @@ def load_ticker(sym, min_dte=7, max_dte=545, expiries=None, max_expiries=config.
         td.chain_status = usable[0] if usable else "UNAVAILABLE"
         if td.chain_status == "UNAVAILABLE":
             td.flags.append(("SEVERE", "Option chain has no live bid/ask (market closed?) - no actionable entry prices"))
+        elif td.chain_status == "LAST SESSION":
+            td.flags.append(("MINOR", "Market closed: option quotes are last-session closing quotes - confirm at the open"))
         elif td.chain_status == "CACHED":
             td.flags.append(("MINOR", "Option quotes are a CACHED last-session snapshot - confirm at the open"))
     else:
-        td.flags.append(("SEVERE", "No option chains for this window"))
+        why = (m or {}).get("note", "")
+        td.flags.append(("SEVERE", "No option chains for this window" + (f" ({why})" if why else "")))
 
     if not full:
         return td
@@ -584,6 +724,8 @@ def load_ticker(sym, min_dte=7, max_dte=545, expiries=None, max_expiries=config.
         if not fu:
             td.flags.append(("MINOR", "No fundamentals available"))
     xq, m = P.news.quote(sym)
+    if not xq and P.cboe is not None:
+        xq, m = P.cboe.quote(sym)
     if xq and P.mode != "demo":
         td.sources.append(dict(m, item="Price cross-check"))
         if abs(xq / td.price - 1) > 0.015:

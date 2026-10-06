@@ -282,6 +282,49 @@ def api_journal():
     return jsonify(stats=services.journal_stats(), entries=rows)
 
 
+# ---------------------------------------------------------------- diagnostics
+@app.get("/api/diagnostics")
+def api_diagnostics():
+    """Tests every data source live and reports exactly what works - no caching."""
+    import time as _t
+    import providers as pv
+    sym = (request.args.get("t") or "SPY").upper()[:10]
+    pv.CACHE._d.clear()
+    P = pv.providers()
+    checks = []
+
+    def run(name, fn):
+        t0 = _t.time()
+        try:
+            ok, detail = fn()
+        except Exception as ex:
+            ok, detail = False, f"{ex.__class__.__name__}: {str(ex)[:160]}"
+        checks.append(dict(name=name, ok=bool(ok), detail=f"{detail} ({_t.time() - t0:.1f}s)"))
+
+    if P.mode == "demo":
+        return jsonify(checks=[dict(name="Data mode", ok=False, detail="DATA_MODE=demo: synthetic data, no live connections used")],
+                       summary="Set DATA_MODE=live to use real data.")
+    try:
+        import yfinance
+        yv = yfinance.__version__
+    except Exception as ex:
+        yv = f"not importable: {ex}"
+    checks.append(dict(name="yfinance version", ok=not yv.startswith("not"), detail=yv))
+    run("Yahoo price history", lambda: (lambda h, m: (h is not None, f"{len(h)} bars" if h is not None else m["note"]))(*P.stock.history(sym)))
+    run("Yahoo quote", lambda: (lambda q, m: (q is not None, f"{q[0]:.2f}" if q else m["note"]))(*P.stock.quote(sym)))
+    run("Yahoo option expiries", lambda: (lambda e, m: (bool(e), f"{len(e)} expiries" if e else m["note"]))(*pv.Yahoo().expiries(sym)))
+    run("Cboe option chain", lambda: (lambda e, m: (bool(e), f"{len(e)} expiries, {m['freshness']}" if e else m["note"]))(*P.cboe.expiries(sym)))
+    run("Option source used by the app", lambda: (lambda e, m: (bool(e), m["source"] if e else m["note"]))(*P.options.expiries(sym)))
+    run("SEC EDGAR fundamentals", lambda: (lambda f, m: (bool(f) or sym in pv.KNOWN_ETFS,
+                                                         "ETF - no company filings" if sym in pv.KNOWN_ETFS else (f"{len(f)} fields" if f else m["note"])))(*P.fundamentals.fundamentals(sym)))
+    run("FRED macro", lambda: (lambda s_, m: (bool(s_), f"{len(s_)} series" if s_ else m["note"]))(*P.macro.series()))
+    run("Finnhub (optional)", lambda: (lambda q, m: (q is not None, f"{q}" if q else m["note"]))(*P.news.quote(sym)))
+    bad = [c["name"] for c in checks if not c["ok"] and "optional" not in c["name"]]
+    summary = "All required sources OK." if not bad else "Problems: " + ", ".join(bad) + \
+        ". Option scans need either 'Cboe option chain' or 'Yahoo option expiries' to pass."
+    return jsonify(checks=checks, summary=summary)
+
+
 # ---------------------------------------------------------------- settings
 @app.get("/api/settings")
 def api_settings():

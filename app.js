@@ -35,7 +35,7 @@ const COLOR = {
 const EMOJI = { green: "🟢", yellow: "🟡", orange: "🟠", red: "🔴", black: "⚫", blue: "🔵" };
 const badge = (s, lg = false) => `<span class="bd ${COLOR[s] || "blue"} ${lg ? "lg" : ""}">${esc(s === "BUY IF TRIGGERED" && !lg ? "BUY IF ≤" : s)}</span>`;
 const verdictText = s => `${EMOJI[COLOR[s]] || ""} ${esc(s)}`;
-const frCls = f => ({ "15-MIN DELAY": "DELAY" }[f] || f || "UNAVAILABLE");
+const frCls = f => ({ "15-MIN DELAY": "DELAY", "LAST SESSION": "CACHED" }[f] || f || "UNAVAILABLE");
 const fr = f => `<span class="fr ${frCls(f)}">${esc(f || "UNAVAILABLE")}</span>`;
 const scoreColor = s => s >= 80 ? "var(--green)" : s >= 70 ? "#8fdc3c" : s >= 60 ? "var(--yellow)" : s >= 50 ? "var(--orange)" : "var(--red)";
 function toast(msg, ms = 3500) {
@@ -481,8 +481,18 @@ async function viewSettings() {
   V().innerHTML = `<div class="grid cols2">${html}<section class="panel"><h2>Data providers & storage</h2><div class="kv"><span>Data mode</span><span>${esc(pv.mode)}</span>
     <span>Stocks / options</span><span>${esc(pv.stock)}</span><span>Fundamentals</span><span>${esc(pv.fundamentals)}</span><span>Macro</span><span>${esc(pv.macro)}</span>
     <span>News / 2nd price</span><span>${esc(pv.news)} ${pv.finnhub_key_set ? "✓" : "(no key)"}</span><span>Database</span><span>${esc(r.database)}</span></div>
-    <p class="c2 mut">API keys are environment variables on the server and are never sent to this page. Providers are swappable adapters (core/providers.py).</p></section></div>
+    <p class="c2 mut">API keys are environment variables on the server and are never sent to this page. Providers are swappable adapters (providers.py).</p>
+    <div class="chips"><input id="dg_t" value="SPY" style="width:90px"><button class="btn sm" onclick="runDiag()">Test data connections</button></div><div id="dg" style="margin-top:8px"></div></section></div>
     <div style="margin-top:12px"><button class="btn green" onclick="saveSettings()">Save settings</button></div>`;
+}
+async function runDiag() {
+  const el = $("#dg"); el.innerHTML = `<div class="mut">Testing each data source… (up to ~30s)</div>`;
+  try {
+    const r = await api(`/api/diagnostics?t=${encodeURIComponent($("#dg_t").value)}`);
+    el.innerHTML = `<table class="tbl"><tr><th>Check</th><th>Result</th><th>Details</th></tr>${r.checks.map(c => `<tr><td>${esc(c.name)}</td>
+      <td>${c.ok ? '<span class="pos">✅ OK</span>' : '<span class="neg">❌ FAIL</span>'}</td><td class="c2">${esc(c.detail)}</td></tr>`).join("")}</table>
+      <div class="c2 mut">${esc(r.summary)}</div>`;
+  } catch (e) { el.innerHTML = `<div class="neg">${esc(e.message)}</div>`; }
 }
 async function saveSettings() {
   const b = {};
