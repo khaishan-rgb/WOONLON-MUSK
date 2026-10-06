@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ai-options-machine
+    runtime: python
+    rootDir: options_machine
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn web:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300
+    healthCheckPath: /health
+    autoDeploy: true

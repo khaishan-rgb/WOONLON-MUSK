@@ -57,3 +57,15 @@ Reports are saved to `reports/` as Markdown and JSON.
   Change the regimes and weights there and the answers change. That's the point: read them as
   "under these assumptions", never as guarantees.
 - Default scan: ~25 tickers, about 5-10 minutes. `--paths 5000` is faster, `--paths 50000` is steadier.
+
+## Render web deployment
+
+This package now includes a Flask web dashboard (`web.py`) and `render.yaml`.
+
+Manual Render settings if not using Blueprint:
+- Root Directory: `options_machine`
+- Build Command: `pip install -r requirements.txt`
+- Start Command: `gunicorn web:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300`
+- Health Check Path: `/health`
+
+The web UI submits scans as in-process jobs and polls for completion. On free/low-memory instances, start with 3-5 tickers and 5,000-10,000 paths per regime.
