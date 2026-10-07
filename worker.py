@@ -18,6 +18,14 @@ def tick():
     if job:
         STATE["current"] = f"scan #{job['id']}"
         services.run_scan(job["id"])
+    bt = db.one("SELECT id FROM backtests WHERE status='QUEUED' ORDER BY id LIMIT 1")
+    if bt:
+        STATE["current"] = f"backtest #{bt['id']}"
+        services.run_backtest(bt["id"])
+    if now - STATE.get("last_rules", 0) > 300:
+        STATE["current"] = "custom triggers"
+        services.eval_rules()
+        STATE["last_rules"] = time.time()
     if now - STATE["last_quotes"] > s["quote_refresh_sec"]:
         STATE["current"] = "quotes"
         services.refresh_quotes()
@@ -51,6 +59,7 @@ def start():
         return
     _started = True
     db.execute("UPDATE scan_jobs SET status='QUEUED', message='Re-queued after restart' WHERE status='RUNNING'")
+    db.execute("UPDATE backtests SET status='QUEUED' WHERE status LIKE 'RUNNING%'")
     threading.Thread(target=loop, daemon=True, name="sentry-worker").start()
 
 

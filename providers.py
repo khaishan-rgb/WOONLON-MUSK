@@ -622,15 +622,18 @@ class DemoData:
 class Providers:
     def __init__(self, mode=config.DATA_MODE):
         self.mode = mode
-        self.cboe = None
+        self.cboe = self.moomoo = None
         if mode == "demo":
             d = DemoData()
             self.stock = self.options = self.info = self.fundamentals = self.macro = self.news = d
         else:
+            from moomoo_store import MoomooBridge, FailoverStock
             y = Yahoo()
             self.cboe = CboeOptions()
-            self.stock = self.info = y
-            self.options = FailoverOptions(self.cboe, y)
+            self.moomoo = MoomooBridge()
+            self.stock = FailoverStock(self.moomoo, y)
+            self.info = y
+            self.options = FailoverOptions(self.moomoo, self.cboe, y)
             self.fundamentals = EdgarFundamentals()
             self.macro = FredMacro()
             self.news = FinnhubNews() if config.FINNHUB_KEY else NullNews()

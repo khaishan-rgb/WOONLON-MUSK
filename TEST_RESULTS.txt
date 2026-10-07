@@ -1,0 +1,28 @@
+SENTRY V3 automated test run - 2026-10-07T00:41Z - Python 3.13.16
+Offline run: live data sources and Moomoo OpenD replaced by fakes (fake_moomoo_sdk.py).
+
+test_flat_layout_imports (__main__.T01Startup.test_flat_layout_imports)
+Every module imports from the repo root (GitHub's web uploader drops folders). ... ok
+test_health_and_static (__main__.T01Startup.test_health_and_static) ... ok
+test_requirements_cover_imports (__main__.T01Startup.test_requirements_cover_imports) ... ok
+test_wsgi_serves_real_http (__main__.T01Startup.test_wsgi_serves_real_http)
+Same 'app:app' object gunicorn imports, served over a real socket. ... ok
+test_monte_carlo_reproducible (__main__.T02Pricing.test_monte_carlo_reproducible) ... ok
+test_put_call_parity_iv_roundtrip_and_american (__main__.T02Pricing.test_put_call_parity_iv_roundtrip_and_american) ... ok
+test_1_scan_states_and_no_trade (__main__.T03Decisions.test_1_scan_states_and_no_trade) ... ok
+test_2_board_and_dashboard (__main__.T03Decisions.test_2_board_and_dashboard) ... ok
+test_3_risk_engine_vetoes_concentration (__main__.T03Decisions.test_3_risk_engine_vetoes_concentration) ... ok
+test_fees_insufficient_cash_and_reset (__main__.T04PaperTrading.test_fees_insufficient_cash_and_reset) ... ok
+test_simulator_labels_and_scenarios (__main__.T05Simulator.test_simulator_labels_and_scenarios) ... ok
+test_walk_forward_no_leakage (__main__.T06Backtest.test_walk_forward_no_leakage) ... ok
+test_code_parser (__main__.T07SecurityAndGateway.test_code_parser) ... ok
+test_cross_site_post_blocked (__main__.T07SecurityAndGateway.test_cross_site_post_blocked) ... ok
+test_gateway_signatures (__main__.T07SecurityAndGateway.test_gateway_signatures) ... ok
+test_login_wall (__main__.T07SecurityAndGateway.test_login_wall) ... ok
+test_nan_never_reaches_browser (__main__.T07SecurityAndGateway.test_nan_never_reaches_browser) ... ok
+test_gateway_sync_chain_and_orders (__main__.T08MoomooEndToEnd.test_gateway_sync_chain_and_orders) ... ok
+
+----------------------------------------------------------------------
+Ran 18 tests in 23.096s
+
+OK

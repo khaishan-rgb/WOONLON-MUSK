@@ -1,36 +1,35 @@
-SENTRY - Render deployment (works with a FLAT repo: every file in the repo root)
+SENTRY V3 - GitHub + Render deployment (flat repo: every file in the repo root)
 
-WHY THE OLD BUILD FAILED
-  Your Render "Build Command" contained "ls core". GitHub's web uploader drops folders,
-  so there is no core/ folder in the repo -> "ls: cannot access 'core'" -> build failed.
-  This version no longer needs any folders.
+STEP 1 - Upload to GitHub (website)
+  Unzip. Open the folder, select ALL files (including the hidden .python-version and .gitignore), drag them onto your
+  repo page -> Commit changes. Replace when asked. Old leftovers you can delete: web.py, main.py, report.py, demo.py,
+  data_sources.py, any *.pyc.
 
-STEP 1 - Clean the repo (GitHub website)
-  Delete these old files if they exist: web.py, main.py, report.py, demo.py, data_sources.py,
-  and every *.pyc file. (They are leftovers; deleting them avoids confusion.)
-
-STEP 2 - Upload
-  Unzip, open the folder, select ALL files (including .python-version and .gitignore),
-  drag them onto the repo page on GitHub -> "Commit changes". Replace when asked.
-
-STEP 3 - Render settings (Dashboard -> your service -> Settings -> Build & Deploy)
-  Build Command:  pip install -r requirements.txt
-  Start Command:  gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300
+STEP 2 - Render settings (your existing service: Settings -> Build & Deploy)
+  Build Command:     pip install -r requirements.txt
+  Start Command:     gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300
   Health Check Path: /health
-  (Nothing else in the build command - no "ls", no "cd core".)
+  Keep exactly ONE gunicorn worker (one background job runner).
 
-STEP 4 - Environment (Settings -> Environment)
-  PYTHON_VERSION = 3.12.3
-  DATA_MODE      = live        (or demo to test with synthetic data)
-  SEC_USER_AGENT = Your Name your@email.com
-  DATABASE_URL   = Internal Database URL of a Render PostgreSQL database
-                   (without it the app uses SQLite, which Render wipes on every deploy)
-  FINNHUB_API_KEY = optional
+STEP 3 - Environment (Settings -> Environment). New in V3 marked *
+  DATA_MODE        = live
+  DATABASE_URL     = Internal Database URL of your Render PostgreSQL (without it data is wiped on every deploy)
+  SEC_USER_AGENT   = Your Name your@email.com
+* APP_PASSWORD     = a login password for the website (strongly recommended - it shows your portfolio)
+* SECRET_KEY       = any long random string
+* GATEWAY_TOKEN    = another long random string - you will paste the same value into gateway.env on your PC
+* ALLOW_REAL_ORDERS= 0      (leave 0 unless you deliberately want real-money orders)
+* ALERT_WEBHOOK_URL= optional, e.g. https://ntfy.sh/<your-secret-topic> for phone notifications
+  FINNHUB_API_KEY  = optional
+  (New service instead? Render -> New -> Blueprint -> this repo: render.yaml creates DB and secrets for you.)
 
-STEP 5 - Manual Deploy -> "Clear build cache & deploy".
-  Then open https://YOUR-APP.onrender.com/health  -> should show "status": "ok".
+STEP 4 - Deploy
+  Manual Deploy -> "Clear build cache & deploy".  Your existing database is upgraded in place (columns added, nothing
+  deleted). Then open https://YOUR-APP.onrender.com/health  -> "status": "ok".
 
-STEP 6 - Check the data connections
-  Open the app -> Settings -> "Test data connections" (or visit /api/diagnostics?t=SPY).
-  "Cboe option chain" or "Yahoo option expiries" must show OK for scans to find contracts.
-  If both FAIL, copy the table and send it - it shows exactly which source is blocked.
+STEP 5 - Check data
+  Log in -> Settings & API -> "Test data connections" (SPY). Cboe or Yahoo option data must show OK for scans.
+
+STEP 6 - Connect Moomoo (optional but recommended): follow MOOMOO_SETUP.md on your own computer.
+
+If a deploy fails, send the last 40 lines of the Render log.

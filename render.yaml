@@ -5,7 +5,7 @@ services:
     runtime: python
     plan: starter            # free plans sleep when idle, which pauses the background worker
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 180 --bind 0.0.0.0:$PORT
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 300
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
@@ -16,10 +16,20 @@ services:
         fromDatabase:
           name: sentry-db
           property: connectionString
+      - key: APP_PASSWORD
+        sync: false          # choose a login password - strongly recommended
+      - key: SECRET_KEY
+        generateValue: true
+      - key: GATEWAY_TOKEN
+        generateValue: true  # copy this value into gateway.env on your computer
+      - key: ALLOW_REAL_ORDERS
+        value: "0"           # 1 = allow real-money orders you confirm (also needs the Settings switch + gateway switch)
       - key: SEC_USER_AGENT
         sync: false          # e.g. "Your Name you@email.com"
       - key: FINNHUB_API_KEY
-        sync: false          # optional, free at finnhub.io
+        sync: false          # optional
+      - key: ALERT_WEBHOOK_URL
+        sync: false          # optional, e.g. https://ntfy.sh/your-secret-topic
 databases:
   - name: sentry-db
     plan: free

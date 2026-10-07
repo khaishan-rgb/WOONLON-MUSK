@@ -8,6 +8,13 @@ RUN_WORKER = os.getenv("RUN_WORKER", "1") == "1"
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "")
 SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "SentryOptions research admin@example.com")
 HTTP_TIMEOUT = 20
+
+# ---------------- Security (all optional, all server-side) ----------------
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")                 # set it: the whole app then needs a login
+SECRET_KEY = os.getenv("SECRET_KEY", "")                     # signs the login cookie; random if unset
+GATEWAY_TOKEN = os.getenv("GATEWAY_TOKEN", "")               # shared secret with moomoo_gateway.py (HMAC)
+ALLOW_REAL_ORDERS = os.getenv("ALLOW_REAL_ORDERS", "0") == "1"   # server-side kill switch for real orders
+ALERT_WEBHOOK_URL = os.getenv("ALERT_WEBHOOK_URL", "")       # optional: POST alerts to ntfy/Slack/Discord etc.
 YAHOO_MIN_INTERVAL = 0.35        # seconds between Yahoo calls (rate limit)
 
 # ---------------- Universe: liquid US names with deep option chains ----------------
@@ -23,6 +30,7 @@ MODES = {
     "FAST":   dict(min_dte=7,   max_dte=60,  label="1-8 weeks"),
     "GROWTH": dict(min_dte=60,  max_dte=185, label="2-6 months"),
     "LEAPS":  dict(min_dte=180, max_dte=545, label="6-18 months"),
+    "YEAR":   dict(min_dte=330, max_dte=560, label="12-18 months (preferred)"),
 }
 
 # ---------------- Contract selection ----------------
@@ -64,6 +72,7 @@ ALERT_TYPES = {
     "hold_to_sell": "HOLD → SELL", "buy_trigger": "Price reaches buy trigger", "profit_target": "Profit target reached",
     "risk_threshold": "Risk threshold reached", "catalyst": "Major catalyst", "earnings": "Earnings approaching",
     "iv_spike": "IV spike", "dte_warning": "DTE warning", "new_90": "New 90+ opportunity",
+    "custom": "Custom trigger", "liquidity": "Liquidity deterioration", "broker": "Moomoo sync / order",
 }
 
 DEFAULT_SETTINGS = dict(
@@ -79,7 +88,13 @@ DEFAULT_SETTINGS = dict(
     # real portfolio
     real_cash=0.0,
     # refresh
-    quote_refresh_sec=60, analysis_refresh_min=20, watch_mode="GROWTH",
+    quote_refresh_sec=60, analysis_refresh_min=20, watch_mode="YEAR",
+    # paper trading realism
+    fee_per_contract=0.65,
+    # risk engine (spec F) - fractions of total account value
+    max_ticker_risk_pct=0.10, max_sector_risk_pct=0.30, max_total_options_pct=0.30,
+    # moomoo gateway
+    mm_sync_sec=60, mm_chain_max_age_min=30, mm_max_tickers=25, real_orders_enabled=False,
     universe=",".join(DEFAULT_UNIVERSE),
     alerts={k: True for k in ALERT_TYPES},
 )

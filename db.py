@@ -17,7 +17,7 @@ _conn = None
 
 SCHEMA = {
     "settings": "key TEXT PRIMARY KEY, value TEXT",
-    "watchlist": ("id {pk}, ticker TEXT UNIQUE, favourite INTEGER DEFAULT 0, added_ts TEXT, mode TEXT, state TEXT, "
+    "watchlist": ("id {pk}, ticker TEXT, favourite INTEGER DEFAULT 0, added_ts TEXT, mode TEXT, state TEXT, "
                   "pending_state TEXT, pending_count INTEGER DEFAULT 0, score {real}, result_id INTEGER, eval_ts TEXT, "
                   "price {real}, change_pct {real}, quote_ts TEXT, quote_fresh TEXT"),
     "scan_jobs": ("id {pk}, created TEXT, started TEXT, finished TEXT, mode TEXT, universe TEXT, status TEXT, "
@@ -41,6 +41,30 @@ SCHEMA = {
                 "outcome_status TEXT DEFAULT 'OPEN', outcome_return {real}, outcome_ts TEXT, outcome_note TEXT"),
     "auto_log": "id {pk}, ts TEXT, ticker TEXT, decision TEXT, reason TEXT, details TEXT",
     "chain_cache": "id {pk}, ticker TEXT, expiry TEXT, ts TEXT, data TEXT",
+    # ---- Moomoo gateway (data pushed from the user's own OpenD; nothing here is fabricated) ----
+    "mm_quotes": "id {pk}, ticker TEXT, ts TEXT, data TEXT",
+    "mm_chains": "id {pk}, ticker TEXT, expiry TEXT, ts TEXT, spot {real}, data TEXT",
+    "mm_klines": "id {pk}, ticker TEXT, ts TEXT, data TEXT",
+    "mm_account": "id {pk}, ts TEXT, data TEXT",
+    "gateway_status": "id {pk}, ts TEXT, data TEXT",
+    # ---- order tickets (manual-approved, never autonomous) ----
+    "order_tickets": ("id {pk}, ts TEXT, env TEXT, ticker TEXT, code TEXT, kind TEXT, strike {real}, expiry TEXT, "
+                      "side TEXT, qty {real}, limit_price {real}, est_cost {real}, max_loss {real}, status TEXT, "
+                      "confirm_ts TEXT, sent_ts TEXT, broker_order_id TEXT, broker_status TEXT, broker_response TEXT, "
+                      "checks TEXT, result_id INTEGER, note TEXT"),
+    # ---- user triggers, paper resets, backtests ----
+    "alert_rules": ("id {pk}, ts TEXT, ticker TEXT, target TEXT, metric TEXT, op TEXT, value {real}, "
+                    "note TEXT, active INTEGER DEFAULT 1, last_fired TEXT"),
+    "demo_resets": "id {pk}, ts TEXT, starting_cash {real}, note TEXT",
+    "backtests": "id {pk}, ts TEXT, status TEXT, params TEXT, result TEXT",
+}
+
+# Columns added after the first release. Existing databases are upgraded in place; nothing is dropped.
+MIGRATIONS = {
+    "watchlist": {"list_name": "TEXT DEFAULT 'Main'", "sector": "TEXT"},
+    "positions": {"broker_code": "TEXT", "epoch": "INTEGER DEFAULT 0", "source": "TEXT"},
+    "demo_trades": {"fee": "{real} DEFAULT 0", "epoch": "INTEGER DEFAULT 0"},
+    "alerts": {"ack_ts": "TEXT"},
 }
 
 
@@ -70,8 +94,26 @@ def init():
     real = "DOUBLE PRECISION" if PG else "REAL"
     for name, cols in SCHEMA.items():
         execute(f"CREATE TABLE IF NOT EXISTS {name} ({cols.format(pk=pk, real=real)})")
+    for table, cols in MIGRATIONS.items():
+        have = {c.lower() for c in _columns(table)}
+        for col, typ in cols.items():
+            if col.lower() not in have:
+                execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ.format(real=real)}")
+    # watchlist used to be UNIQUE(ticker); multiple lists need the same ticker on several lists.
+    if PG:
+        execute("ALTER TABLE watchlist DROP CONSTRAINT IF EXISTS watchlist_ticker_key")
+    # (old local SQLite files keep the old rule: one list per ticker - the app explains this if it happens)
     execute("CREATE INDEX IF NOT EXISTS ix_results_job ON results(job_id)")
+    execute("CREATE INDEX IF NOT EXISTS ix_mmchain ON mm_chains(ticker, expiry)")
+    execute("CREATE INDEX IF NOT EXISTS ix_mmquote ON mm_quotes(ticker)")
     execute("CREATE INDEX IF NOT EXISTS ix_chain ON chain_cache(ticker, expiry)")
+
+
+def _columns(table):
+    if PG:
+        return [r["column_name"] for r in all(
+            "SELECT column_name FROM information_schema.columns WHERE table_name=?", (table,))]
+    return [r["name"] for r in all(f"PRAGMA table_info({table})")]
 
 
 def execute(q, params=(), commit=True):

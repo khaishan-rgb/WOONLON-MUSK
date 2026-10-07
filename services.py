@@ -80,11 +80,54 @@ def alert(kind, ticker, title, message, urgency=50, ref=""):
     s = db.get_settings()
     if not s["alerts"].get(kind, True):
         return
-    since = (dt.datetime.utcnow() - dt.timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    since = (dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M:%SZ")
     if db.one("SELECT id FROM alerts WHERE type=? AND ticker=? AND ref=? AND ts>?", (kind, ticker, ref, since)):
         return
     db.insert("alerts", dict(ts=iso(), type=kind, ticker=ticker, title=title, message=message, urgency=urgency,
                              ref=ref, is_read=0))
+    if config.ALERT_WEBHOOK_URL:          # optional push notification (ntfy.sh, Slack/Discord webhook...)
+        try:
+            import requests
+            requests.post(config.ALERT_WEBHOOK_URL, timeout=8,
+                          json=dict(title=f"SENTRY: {title}", message=message, ticker=ticker, urgency=urgency,
+                                    text=f"SENTRY {title} - {message}", content=f"**SENTRY {title}** {message}"))
+        except Exception:
+            traceback.print_exc()
+
+
+def ack_alert(aid):
+    db.execute("UPDATE alerts SET is_read=1, ack_ts=? WHERE id=?", (iso(), aid))
+
+
+# ------------------------------------------------------------------ custom triggers (spec 9)
+RULE_METRICS = {"stock_price": "Stock price", "option_mark": "Option price (mid)", "pnl_pct": "Position P/L %",
+                "dte": "Days to expiry", "iv": "Implied volatility", "spread_pct": "Bid/ask spread %"}
+
+
+def eval_rules():
+    for r in db.all("SELECT * FROM alert_rules WHERE active=1"):
+        try:
+            val, label = None, r["ticker"]
+            if r["metric"] == "stock_price":
+                q, _ = providers().stock.quote(r["ticker"])
+                val = q[0] if q else None
+            elif r["target"] and r["target"].startswith("position:"):
+                p = db.one("SELECT * FROM positions WHERE id=?", (int(r["target"].split(":")[1]),))
+                ev = db.jload(p["last_eval"], {}) if p else {}
+                val = {"option_mark": ev.get("mark"), "pnl_pct": ev.get("pnl_pct"), "dte": ev.get("dte"),
+                       "iv": ev.get("iv"),
+                       "spread_pct": ((ev["ask"] - ev["bid"]) / ev["mark"]) if ev.get("ask") and ev.get("bid") and ev.get("mark") else None
+                       }.get(r["metric"])
+                label = f"{r['ticker']} position #{p['id']}" if p else label
+            if val is None:
+                continue
+            hit = val >= r["value"] if r["op"] == ">=" else val <= r["value"]
+            if hit:
+                alert("custom", r["ticker"], f"{label}: {RULE_METRICS.get(r['metric'], r['metric'])} {r['op']} {r['value']:g}",
+                      f"Now {val:.4g}. {r['note'] or ''}".strip(), 75, f"rule{r['id']}")
+                db.update("alert_rules", r["id"], dict(last_fired=iso()))
+        except Exception:
+            traceback.print_exc()
 
 
 # ------------------------------------------------------------------ scans (background)
@@ -137,12 +180,16 @@ def latest_scan_rows(mode=None):
 
 
 # ------------------------------------------------------------------ watchlist (spec 2) with hysteresis
-def watch_add(sym, mode=None):
+def watch_add(sym, mode=None, list_name="Main"):
     sym = sym.upper().strip()
-    if not sym or db.one("SELECT id FROM watchlist WHERE ticker=?", (sym,)):
-        return
-    db.insert("watchlist", dict(ticker=sym, favourite=0, added_ts=iso(), mode=mode or db.get_settings()["watch_mode"],
-                                state=None, pending_count=0))
+    list_name = (list_name or "Main").strip()[:40] or "Main"
+    if not sym or db.one("SELECT id FROM watchlist WHERE ticker=? AND COALESCE(list_name,'Main')=?", (sym, list_name)):
+        return None
+    try:
+        return db.insert("watchlist", dict(ticker=sym, favourite=0, added_ts=iso(), mode=mode or db.get_settings()["watch_mode"],
+                                           state=None, pending_count=0, list_name=list_name))
+    except Exception as ex:            # databases created before multi-list support keep ticker UNIQUE
+        raise ValueError(f"{sym} is already on another list ({ex.__class__.__name__})")
 
 
 def refresh_quotes():
@@ -167,6 +214,11 @@ def refresh_watch_item(w, settings=None, macro=None, bench=None):
     rid = save_result(best, "watchlist")
     new, old = best["state"], w["state"]
     upd = dict(result_id=rid, score=best["score"], eval_ts=iso(), price=best["price"], change_pct=best["change_pct"])
+    try:
+        info, _ = providers().info.info(w["ticker"])
+        upd["sector"] = (info or {}).get("sector") or ("ETF" if (info or {}).get("quoteType") == "ETF" else None)
+    except Exception:
+        pass
     # Hysteresis: a state change needs two consecutive engine runs agreeing, unless the score moved decisively.
     if old is None:
         upd.update(state=new, pending_state=None, pending_count=0)
@@ -212,7 +264,10 @@ def watchlist_rows():
         row.update(ticker=w["ticker"], id=w["id"], favourite=bool(w["favourite"]), state=w["state"] or "PENDING",
                    pending_state=w["pending_state"], price=w["price"] if w["price"] is not None else row.get("price"),
                    change_pct=w["change_pct"], eval_ts=w["eval_ts"], quote_fresh=w["quote_fresh"],
-                   result_id=w["result_id"], mode=w["mode"])
+                   result_id=w["result_id"], mode=w["mode"], list_name=w.get("list_name") or "Main",
+                   sector=w.get("sector") or "Unknown")
+        row["outlook"] = "Bullish" if row.get("direction") == "BULLISH" else "Bearish" if row.get("direction") == "BEARISH" else "—"
+        row["cost"] = row["premium"] * 100 if row.get("premium") else None
         out.append(row)
     return out
 
@@ -266,7 +321,7 @@ def position_rows(account):
     for p in db.all("SELECT * FROM positions WHERE account=? AND status='OPEN' ORDER BY id", (account,)):
         ev = db.jload(p["last_eval"], {})
         ev.pop("report", None)
-        out.append(dict(id=p["id"], ticker=p["ticker"], kind=p["kind"], strike=p["strike"], expiry=p["expiry"],
+        out.append(dict(id=p["id"], account=p["account"], broker_code=p.get("broker_code"), ticker=p["ticker"], kind=p["kind"], strike=p["strike"], expiry=p["expiry"],
                         qty=p["qty"], entry_premium=p["entry_premium"], entry_date=p["entry_date"], auto=bool(p["auto"]),
                         contract=f"{dt.date.fromisoformat(p['expiry']).strftime('%d %b %Y').upper()} ${p['strike']:g} {p['kind'].upper()}",
                         eval=ev, eval_ts=p["last_eval_ts"]))
@@ -312,11 +367,26 @@ def _quote_contract(ticker, kind, strike, expiry):
     return dict(bid=bid, ask=ask, status=td.chain_status), None
 
 
+def demo_epoch():
+    r = db.one("SELECT id, starting_cash FROM demo_resets ORDER BY id DESC LIMIT 1")
+    return (r["id"], float(r["starting_cash"])) if r else (0, float(db.get_settings()["demo_starting_cash"]))
+
+
 def demo_cash():
-    s = db.get_settings()
-    t = db.all("SELECT side, qty, premium FROM demo_trades")
-    flow = sum((-1 if x["side"] == "BUY" else 1) * x["qty"] * x["premium"] * 100 for x in t)
-    return float(s["demo_starting_cash"]) + flow
+    ep, start = demo_epoch()
+    t = db.all("SELECT side, qty, premium, fee FROM demo_trades WHERE COALESCE(epoch,0)=?", (ep,))
+    flow = sum((-1 if x["side"] == "BUY" else 1) * x["qty"] * x["premium"] * 100 - (x["fee"] or 0) for x in t)
+    return start + flow
+
+
+def demo_reset(starting_cash=None, note="Manual reset"):
+    """Start a fresh paper account. Old trades stay in the audit trail under their previous epoch."""
+    start = float(starting_cash or db.get_settings()["demo_starting_cash"])
+    ep = db.insert("demo_resets", dict(ts=iso(), starting_cash=start, note=note))
+    for p in db.all("SELECT id FROM positions WHERE account='demo' AND status='OPEN'"):
+        db.update("positions", p["id"], dict(status="CLOSED", exit_ts=iso(), exit_reason=f"Paper account reset #{ep}"))
+    db.insert("demo_equity", dict(ts=iso(), equity=start, cash=start))
+    return ep
 
 
 def paper_buy(ticker, kind, strike, expiry, qty, reason="Manual paper buy", auto=False, rec=None):
@@ -324,18 +394,20 @@ def paper_buy(ticker, kind, strike, expiry, qty, reason="Manual paper buy", auto
     if err:
         return None, err
     qty = int(qty)
-    cost = q["ask"] * qty * 100
+    fee = float(db.get_settings()["fee_per_contract"]) * qty
+    cost = q["ask"] * qty * 100 + fee
     if qty < 1:
         return None, "Quantity must be at least 1"
     if cost > demo_cash() + 1e-6:
-        return None, f"Not enough demo cash (${demo_cash():,.2f}) for ${cost:,.2f}"
+        return None, f"Not enough paper cash (${demo_cash():,.2f}) for ${cost:,.2f} incl. ${fee:.2f} fees"
+    ep, _ = demo_epoch()
     rec = rec or {}
     plan = rec.get("plan", {})
     pid = add_position("demo", ticker, kind, strike, expiry, qty, q["ask"], auto=1 if auto else 0,
                        entry_score=rec.get("score"), entry_pop=(rec.get("stats") or {}).get("p_profit"),
                        entry_ev=(rec.get("stats") or {}).get("mean"), signal_ts=rec.get("ts"),
-                       thesis_level=plan.get("stop_stock"), target_price=plan.get("main_price"))
-    db.insert("demo_trades", dict(ts=iso(), position_id=pid, side="BUY", ticker=ticker.upper(),
+                       thesis_level=plan.get("stop_stock"), target_price=plan.get("main_price"), epoch=ep)
+    db.insert("demo_trades", dict(ts=iso(), position_id=pid, side="BUY", ticker=ticker.upper(), fee=fee, epoch=ep,
                                   contract=f"{expiry} {strike:g} {kind.upper()}", qty=qty, premium=q["ask"], reason=reason,
                                   score=rec.get("score"), pop=(rec.get("stats") or {}).get("p_profit"),
                                   ev=(rec.get("stats") or {}).get("mean"), pnl=None, holding_days=None, auto=1 if auto else 0))
@@ -352,9 +424,13 @@ def paper_sell(pid, qty=None, reason="Manual paper sell", auto=False):
         return None, err
     qty = int(qty or p["qty"])
     qty = max(1, min(qty, int(p["qty"])))
-    pnl = (q["bid"] - p["entry_premium"]) * qty * 100
+    fee = float(db.get_settings()["fee_per_contract"]) * qty
+    buy_fee = db.one("SELECT fee, qty FROM demo_trades WHERE position_id=? AND side='BUY' ORDER BY id LIMIT 1", (pid,))
+    buy_fee_part = ((buy_fee["fee"] or 0) / buy_fee["qty"] * qty) if buy_fee and buy_fee["qty"] else 0.0
+    pnl = (q["bid"] - p["entry_premium"]) * qty * 100 - fee - buy_fee_part
     days = (dt.date.today() - dt.date.fromisoformat(p["entry_date"])).days
-    db.insert("demo_trades", dict(ts=iso(), position_id=pid, side="SELL", ticker=p["ticker"],
+    db.insert("demo_trades", dict(ts=iso(), position_id=pid, side="SELL", ticker=p["ticker"], fee=fee,
+                                  epoch=p.get("epoch") or 0,
                                   contract=f"{p['expiry']} {p['strike']:g} {p['kind'].upper()}", qty=qty, premium=q["bid"],
                                   reason=reason, score=None, pop=None, ev=None, pnl=pnl, holding_days=days, auto=1 if auto else 0))
     left = p["qty"] - qty
@@ -382,15 +458,19 @@ def snapshot_demo_equity():
 
 def demo_metrics():
     s = db.get_settings()
-    start = float(s["demo_starting_cash"])
+    ep, start = demo_epoch()
     eq, val, rows = demo_equity()
     unreal = sum((r["eval"].get("mark", r["entry_premium"]) - r["entry_premium"]) * r["qty"] * 100
                  for r in rows if r["eval"].get("mark") is not None)
-    closed = db.all("SELECT realised FROM positions WHERE account='demo' AND status='CLOSED'")
-    realised = sum((p["realised"] or 0) for p in db.all("SELECT realised FROM positions WHERE account='demo'"))
+    closed = db.all("SELECT realised FROM positions WHERE account='demo' AND status='CLOSED' AND COALESCE(epoch,0)=? "
+                    "AND (exit_reason IS NULL OR exit_reason NOT LIKE 'Paper account reset%')", (ep,))
+    realised = sum((p["realised"] or 0) for p in db.all(
+        "SELECT realised FROM positions WHERE account='demo' AND COALESCE(epoch,0)=?", (ep,)))
     wins = [p["realised"] for p in closed if (p["realised"] or 0) > 0]
     losses = [p["realised"] for p in closed if (p["realised"] or 0) <= 0]
-    curve = [r["equity"] for r in db.all("SELECT equity FROM demo_equity ORDER BY id")] or [start]
+    reset_ts = db.one("SELECT ts FROM demo_resets WHERE id=?", (ep,))
+    curve = [r["equity"] for r in db.all("SELECT equity FROM demo_equity WHERE ts>=? ORDER BY id",
+                                         (reset_ts["ts"] if reset_ts else "",))] or [start]
     peak, mdd = start, 0.0
     for e in [start] + curve:
         peak = max(peak, e)
@@ -398,14 +478,15 @@ def demo_metrics():
     today = dt.date.today().isoformat()
     before = db.one("SELECT equity FROM demo_equity WHERE ts<? ORDER BY id DESC LIMIT 1", (today,))
     day_ref = before["equity"] if before else start
-    n_trades = db.one("SELECT COUNT(*) AS n FROM demo_trades WHERE side='BUY'")["n"]
+    n_trades = db.one("SELECT COUNT(*) AS n FROM demo_trades WHERE side='BUY' AND COALESCE(epoch,0)=?", (ep,))["n"]
+    fees = db.one("SELECT COALESCE(SUM(fee),0) AS f FROM demo_trades WHERE COALESCE(epoch,0)=?", (ep,))["f"]
     return dict(equity=eq, cash=demo_cash(), options_value=val, realised=realised, unrealised=unreal,
                 total_return=eq / start - 1, day_pl=eq - day_ref, day_pl_pct=eq / day_ref - 1 if day_ref else None,
                 win_rate=len(wins) / len(closed) if closed else None, avg_winner=float(np.mean(wins)) if wins else None,
                 avg_loser=float(np.mean(losses)) if losses else None,
                 profit_factor=(sum(wins) / -sum(losses)) if losses and sum(losses) < 0 else None,
                 max_drawdown=mdd, trades=n_trades, closed=len(closed), start=start, auto=s["auto_demo"],
-                curve=curve[-120:])
+                curve=curve[-120:], fees=fees, epoch=ep, label="SENTRY Paper Trading (simulated, real quotes)")
 
 
 def auto_buy(p, rid):
@@ -519,11 +600,11 @@ def journal_stats():
 # ------------------------------------------------------------------ action queue + dashboard (spec 1, 9)
 def action_queue():
     items = []
-    for r in position_rows("real"):
+    for r in position_rows("real") + position_rows("moomoo"):
         ev = r["eval"]
         if not ev:
             continue
-        items.append(dict(kind="position", id=r["id"], ticker=r["ticker"], contract=r["contract"], action=ev["action"],
+        items.append(dict(kind="position", id=r["id"], account=r.get("account"), ticker=r["ticker"], contract=r["contract"], action=ev["action"],
                           reason=ev.get("reason"), mark=ev.get("mark"), pnl_pct=ev.get("pnl_pct"), ts=r["eval_ts"],
                           urgency=ACTION_URGENCY.get(ev["action"], 0)))
     for w in db.all("SELECT * FROM watchlist WHERE state='BUY NOW'"):
@@ -543,7 +624,52 @@ def data_status():
     last_scan = db.one("SELECT MAX(finished) AS t FROM scan_jobs")["t"]
     ts = max([x for x in (last, last_pos, last_scan) if x] or [None]) if any((last, last_pos, last_scan)) else None
     label = "SYNTHETIC" if P.mode == "demo" else "15-MIN DELAY"
+    try:
+        import moomoo_store as mms
+        if P.mode != "demo" and mms.gateway_info()["connected"]:
+            label = "MOOMOO + DELAYED"
+    except Exception:
+        pass
     return dict(mode=P.mode, label=label, last_update=ts, providers=P.describe())
+
+
+def decision_board(rows):
+    """Beginner home screen: WHAT TO BUY | HOLD | SELL | AVOID. A BUY that fails the portfolio-risk engine
+    is moved to AVOID with the reason - the risk engine can veto any trade."""
+    import risk
+    buy, hold, sell, avoid = [], [], [], []
+    for r in rows:
+        if "error" in r:
+            continue
+        why = r.get("headline")
+        if r.get("state") in ("WAIT", "AVOID"):
+            bar = db.get_settings()["entry_min_score"]
+            why = (f"Score {r.get('score') or 0:.0f}/100 (BUY needs {bar}); chance of profit {(r.get('pop') or 0):.0%}, "
+                   f"{r.get('risk') or '?'} risk of losing most of the premium")
+        item = dict(ticker=r["ticker"], what=r.get("contract"), why=why, score=r.get("score"),
+                    state=r.get("state"), result_id=r.get("result_id"), premium=r.get("premium"))
+        if r.get("state") in ("BUY NOW", "BUY IF TRIGGERED"):
+            try:
+                rep_ = db.one("SELECT payload FROM results WHERE id=?", (r["result_id"],))
+                chk = risk.check(db.jload(rep_["payload"]), deep=False) if rep_ and rep_["payload"] else None
+            except Exception:
+                chk = None
+            if chk and not chk["ok"]:
+                bad = [c["name"] for c in chk["checks"] if not c["passed"] and c["severity"] == "SEVERE"]
+                avoid.append(dict(item, state="AVOID", why="Portfolio risk: " + "; ".join(bad)))
+            else:
+                buy.append(item)
+        elif len(avoid) < 6:
+            avoid.append(item)
+    for acct in ("real", "moomoo"):
+        for p in position_rows(acct):
+            ev = p["eval"] or {}
+            a = ev.get("action")
+            item = dict(ticker=p["ticker"], what=p["contract"], why=ev.get("reason") or "Waiting for first evaluation",
+                        state=a or "PENDING", position_id=p["id"], account=acct, pnl_pct=ev.get("pnl_pct"))
+            (sell if a in ("SELL", "EXIT NOW", "TAKE 25% PROFIT", "TAKE 50% PROFIT") else hold).append(item)
+    return dict(buy=buy[:6], hold=hold, sell=sell, avoid=avoid[:6],
+                no_trade=not buy, no_trade_text="NO TRADE TODAY - nothing passed every rule. Cash is a position.")
 
 
 def dashboard():
@@ -553,4 +679,31 @@ def dashboard():
                 opportunities=[r for r in rows if "error" not in r][:12],
                 scan=dict(job) if job else None, no_trade=bool(job) and not any(
                     r.get("state") in ("BUY NOW", "BUY IF TRIGGERED") for r in rows),
-                alerts_unread=db.one("SELECT COUNT(*) AS n FROM alerts WHERE is_read=0")["n"])
+                alerts_unread=db.one("SELECT COUNT(*) AS n FROM alerts WHERE is_read=0")["n"],
+                board=decision_board(rows), moomoo=moomoo_summary())
+
+
+def moomoo_summary():
+    import moomoo_store as mms
+    g = mms.gateway_info()
+    funds = (g.get("account") or {}).get("funds") or {}
+    rows = position_rows("moomoo")
+    return dict(connected=g["connected"], configured=g["configured"], last_seen=g.get("last_seen"),
+                account_ts=g.get("account_ts"), total_assets=funds.get("total_assets"), cash=funds.get("cash"),
+                power=funds.get("power"), unrealized_pl=funds.get("unrealized_pl"), realized_pl=funds.get("realized_pl"),
+                option_positions=len(rows), caps=g.get("caps", {}))
+
+
+# ------------------------------------------------------------------ backtests (background)
+def run_backtest(bid):
+    import backtest
+    b = db.one("SELECT * FROM backtests WHERE id=?", (bid,))
+    db.update("backtests", bid, dict(status="RUNNING"))
+    def prog(i, n, sym):
+        db.update("backtests", bid, dict(status=f"RUNNING {i + 1}/{n} {sym}"))
+    try:
+        res = backtest.run(db.jload(b["params"], {}), progress=prog)
+        db.update("backtests", bid, dict(status="DONE" if "error" not in res else "FAILED", result=db.jdump(res)))
+    except Exception as ex:
+        traceback.print_exc()
+        db.update("backtests", bid, dict(status="FAILED", result=db.jdump(dict(error=f"{ex.__class__.__name__}: {ex}"))))

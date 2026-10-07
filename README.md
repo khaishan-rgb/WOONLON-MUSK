@@ -1,81 +1,81 @@
-# S.E.N.T.R.Y — A.I. Options Command Centre (V2)
+# S.E.N.T.R.Y — AI Options Intelligence & Decision System (V3)
 
-A web app that answers two questions in plain language:
+A decision-support web app for US stock options. It answers four questions in plain English:
 
-1. **What option should I consider buying now?** → 🟢 BUY NOW · 🟢 BUY IF TRIGGERED · 🟡 WAIT · ⚫ AVOID
-2. **For options I own: hold, take profit or sell?** → 🟢 ADD/BUY · 🟢 HOLD · 🟡 HOLD/WATCH · 🟠 TAKE 25%/50% · 🔴 SELL · 🔴 EXIT NOW
+| Question | Possible answers |
+|---|---|
+| **BUY** – what should I consider buying now? | BUY NOW · BUY IF TRIGGERED (at or below a price) · or **NO TRADE TODAY** |
+| **HOLD** – keep my current option? | HOLD · HOLD / WATCH · ADD / BUY |
+| **SELL** – take profit or cut? | TAKE 25% / 50% PROFIT · SELL · EXIT NOW |
+| **WAIT** – better to do nothing? | WAIT · AVOID |
 
-It never places real trades. The demo account uses virtual money only. "NO TRADE TODAY" is a valid answer.
+Every decision shows the contract, entry range, profit and exit levels, maximum loss, reasons for and against,
+scenario outcomes, data freshness, and what would change the AI's mind. Probabilities are model estimates — never
+guarantees — and the Trade Journal measures whether they are honest over time.
 
-## Run it on your computer (5 minutes)
+## What's new in V3
+- **Moomoo integration** through the official OpenD gateway (read-only by default): real positions, cash, buying
+  power, option chains with bid/ask, IV and Greeks. See `MOOMOO_SETUP.md`.
+- **Command Dashboard**: WHAT TO BUY | WHAT TO HOLD | WHAT TO SELL | WHAT TO AVOID.
+- **Risk engine (Engine F)**: position size, sector concentration, correlation, buying power — it can veto any trade.
+- **Options Simulator**: your contract, your assumptions, values at several exit dates, distribution and break-even chart.
+- **Backtesting**: walk-forward, out-of-sample, with benchmarks and honest labelling (option prices are modelled).
+- **Paper Trading**: fees, ask/bid fills, reset with a permanent audit trail, clearly separate from real holdings.
+- **Order tickets** (Phase 3): manual approval with a typed confirmation; Moomoo paper account by default; real money
+  needs three separate switches. Nothing is ever placed silently.
+- **Alerts**: custom triggers, acknowledgement, de-duplication, optional phone push via webhook.
+- **Security**: login password, signed + replay-protected gateway requests, no secrets in the browser or database.
+- **12–18-month expiries** preferred by default (new YEAR mode), shorter modes still available.
+
+## Run locally
 ```bash
 pip install -r requirements.txt
-DATA_MODE=demo python app.py      # synthetic test data, works offline -> http://localhost:8000
-python app.py                     # real (free, ~15-min delayed) market data
+DATA_MODE=demo python app.py         # synthetic data, works offline -> http://localhost:8000
+python app.py                        # real data (free delayed feeds + Moomoo if the gateway runs)
+python test_sentry.py                # automated tests (offline, standard library only)
 ```
-On Windows PowerShell use `$env:DATA_MODE="demo"; python app.py`.
+Windows PowerShell: `$env:DATA_MODE="demo"; python app.py`
 
-## Put it on GitHub
-1. Create an empty repository on github.com (no README), e.g. `sentry-options`.
-2. In this folder:
-```bash
-git init
-git add .
-git commit -m "Options Command Centre V2"
-git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/sentry-options.git
-git push -u origin main
-```
-`.gitignore` already keeps your database and any `.env` file out of the repository. Never commit API keys.
+## Deploy
+See `RENDER_DEPLOY.txt`. The repo works flat (all files in the root) — GitHub's web uploader drops folders.
 
-## Deploy on Render
-1. Render dashboard → **New → Blueprint** → choose the GitHub repo. `render.yaml` creates the web service and a PostgreSQL database.
-2. Set `SEC_USER_AGENT` (your name + email) and, optionally, `FINNHUB_API_KEY`.
-3. Health check: `/health`.
+## Files
+| File | Purpose |
+|---|---|
+| `app.py` | Web server, API routes, login, gateway endpoints |
+| `moomoo_gateway.py` | **Runs on your computer** next to moomoo OpenD; pushes signed data to the website |
+| `moomoo_store.py` | Server side of Moomoo: storage, freshness labels, data adapters, position sync |
+| `orders.py` | Manual-approved order tickets |
+| `risk.py` | Portfolio risk engine |
+| `optsim.py` | Options profit simulator |
+| `backtest.py` | Walk-forward backtest (modelled option prices) |
+| `analysis.py`, `decisions.py`, `engines.py`, `simulate.py`, `pricing.py` | Analysis engines, entry/hold/exit logic, Monte Carlo, pricing |
+| `providers.py` | Data adapters with failover: Moomoo → Cboe → Yahoo; SEC EDGAR; FRED; Finnhub |
+| `services.py`, `worker.py`, `db.py` | Business logic, background jobs, SQLite/PostgreSQL |
+| `index.html`, `app.js`, `style.css` | The dashboard |
+| `test_sentry.py`, `fake_moomoo_sdk.py` | Tests and the offline stand-in for the Moomoo SDK used only by tests |
 
-Notes: use one gunicorn worker (as configured) so there is exactly one background job runner.
-Free Render web services sleep when idle, which pauses background refreshes; free databases have limits — check Render's current terms.
-Use PostgreSQL in production: Render's disk is wiped on every deploy, so SQLite data would be lost.
-
-## Environment variables
+## Environment variables (server)
 | Variable | Purpose |
 |---|---|
-| `DATA_MODE` | `live` (default) or `demo` (synthetic data, clearly labelled) |
-| `DATABASE_URL` | `sqlite:///data/sentry.db` locally, PostgreSQL URL in production |
-| `SEC_USER_AGENT` | Required politeness header for SEC EDGAR ("Name email") |
-| `FINNHUB_API_KEY` | Optional: second price source (cross-check) + news |
-| `RUN_WORKER` | `1` (default) runs the background worker in the web process |
-
-Keys stay on the server. The browser only talks to this app's `/api`.
-
-## How it maps to the V2 spec
-| Spec | Where |
-|---|---|
-| Navigation, dark command-centre UI, mobile order | `static/` |
-| Market status, data freshness labels (never "LIVE" for delayed data) | `core/market.py`, `core/providers.py` |
-| Interchangeable provider adapters, caching, rate limits | `core/providers.py` |
-| Entry score / Hold score / Exit pressure (3 engines) | `core/decisions.py` |
-| Buy trigger price range, trade plan levels (derived, not fixed %) | `decisions.apply_plan`, `decisions.buy_trigger` |
-| Would AI buy it today? (no sunk-cost bias) | `analysis.evaluate_position` |
-| Monte Carlo 10k / 50k, 11 regimes, fat tails, jumps | `core/simulate.py` |
-| Fair value CHEAP → VERY EXPENSIVE | `decisions.fair_class` |
-| Committee, contrarian, risk vetoes | `core/engines.py` |
-| Scanner modes FAST / GROWTH / LEAPS, background jobs | `services.run_scan`, `core/worker.py` |
-| Watchlist with hysteresis (no flip on small price moves) | `services.refresh_watch_item` |
-| Demo account, partial sells, auto paper trading + decision log | `services.paper_*`, `services.auto_*` |
-| Alerts + Action Required queue | `services.alert`, `services.action_queue` |
-| Trade journal, outcomes, calibration | `services.journal_*` |
-| Database persistence (SQLite / PostgreSQL) | `core/db.py` |
+| `DATA_MODE` | `live` (default) or `demo` |
+| `DATABASE_URL` | PostgreSQL URL on Render (SQLite file locally) |
+| `APP_PASSWORD` | Login password for the website — set it |
+| `SECRET_KEY` | Signs the login cookie |
+| `GATEWAY_TOKEN` | Shared secret with `moomoo_gateway.py` |
+| `ALLOW_REAL_ORDERS` | `0` (default). `1` lets confirmed real-money tickets through |
+| `SEC_USER_AGENT` | "Name email" for SEC EDGAR |
+| `FINNHUB_API_KEY` | Optional second price source + news |
+| `ALERT_WEBHOOK_URL` | Optional push notifications (e.g. an ntfy.sh topic URL) |
 
 ## Honest limits
-- Free data is delayed ~15 minutes and Yahoo access is unofficial; it can break or rate-limit.
-- When the market is closed, Yahoo often shows no bid/ask. The app then serves the last real snapshot it saved,
-  labelled **CACHED**, and will not issue BUY NOW from it — at most BUY IF TRIGGERED, to confirm at the open.
-  A fresh install at night has no snapshot yet, so expect "no liquid contract" until the next session.
-- Probabilities are model estimates. The journal measures whether they are calibrated — trust them only once
-  enough outcomes have accumulated.
-- Default thresholds are strict on purpose (Entry Score ≥ 80 etc.). Expect many WAIT/AVOID results. Adjust in Settings.
+- **Free data is delayed** (~15 min) and Yahoo often blocks cloud servers; Cboe is the free fallback. With the Moomoo
+  gateway running, option data comes from your own Moomoo quote rights.
+- **US options quotes on Moomoo** are free (LV1) only if your account has assets or US positions; otherwise Moomoo
+  sells an OPRA quote card. The gateway reports whether quotes actually came back.
+- **Backtests use modelled option prices** — no free source has historical option quotes. The app says so on the page.
+- **Probabilities are uncalibrated** until the Trade Journal has enough closed outcomes; reports say which.
+- **Tested offline only** with a stand-in for the Moomoo SDK built from the official documentation; the first run
+  against a real OpenD may need a small fix. `python moomoo_gateway.py --selftest` checks it without sending anything.
 
-## Repo layout
-The app runs whether the files sit in `core/` and `static/` folders or all together in the repo root
-(GitHub's drag-and-drop uploader flattens folders). See `RENDER_DEPLOY.txt`.
+Research and decision-support tool. Not financial advice. Options can lose 100% of the premium.
